@@ -1,12 +1,14 @@
-
 import { NextResponse } from "next/server";
 import { FieldValue } from "firebase-admin/firestore";
-import { adminDb } from "@/lib/firebase-admin";
+import { getAdminDb } from "@/lib/firebase-admin";
 
 export const runtime = "nodejs";
 
 export async function POST(request: Request) {
   try {
+    const adminDb = getAdminDb();
+
+    // Keep the rest of your existing code here.
     const body = await request.json();
 
     const username =

@@ -1,14 +1,14 @@
-
 import "server-only";
 
 import {
   cert,
   getApps,
   initializeApp,
+  type App,
 } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 
-function getFirebaseAdminApp() {
+export function getFirebaseAdminApp(): App {
   const existing = getApps().find(
     (app) => app.name === "whispr-admin"
   );
@@ -30,25 +30,18 @@ function getFirebaseAdminApp() {
     .replace(/^["']|["']$/g, "")
     .replace(/\\n/g, "\n");
 
-  try {
-    return initializeApp(
-      {
-        credential: cert({
-          projectId,
-          clientEmail,
-          privateKey,
-        }),
-      },
-      "whispr-admin"
-    );
-  } catch (error) {
-    console.error(
-      "Firebase Admin initialization failed:",
-      error instanceof Error ? error.message : "Unknown error"
-    );
-    throw error;
-  }
+  return initializeApp(
+    {
+      credential: cert({
+        projectId,
+        clientEmail,
+        privateKey,
+      }),
+    },
+    "whispr-admin"
+  );
 }
 
-export const adminApp = getFirebaseAdminApp();
-export const adminDb = getFirestore(adminApp);
+export function getAdminDb() {
+  return getFirestore(getFirebaseAdminApp());
+}
