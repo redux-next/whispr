@@ -1,0 +1,3 @@
+[build.environment]
+  # APP_ORIGIN is a public URL (also documented in README.md and .env.example), not a secret.
+  SECRETS_SCAN_OMIT_KEYS = "APP_ORIGIN"
