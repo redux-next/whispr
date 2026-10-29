@@ -1,0 +1,417 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import { onAuthStateChanged, signOut, type User } from "firebase/auth";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  where,
+} from "firebase/firestore";
+import { useRouter } from "next/navigation";
+import { auth, db } from "@/lib/firebase";
+import "./dashboard.css";
+
+type Message = {
+  id: string;
+  recipientUid?: string;
+  text?: string;
+  tag?: string;
+  createdAt?: { toDate?: () => Date } | Date | string | null;
+};
+
+type Tab = "inbox" | "stories" | "profile";
+
+function formatDate(value: Message["createdAt"]) {
+  if (!value) return "Recently";
+  try {
+    const date =
+      typeof value === "string"
+        ? new Date(value)
+        : value instanceof Date
+          ? value
+          : typeof value.toDate === "function"
+            ? value.toDate()
+            : null;
+    if (!date || Number.isNaN(date.getTime())) return "Recently";
+    return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  } catch {
+    return "Recently";
+  }
+}
+
+function getErrorMessage(error: unknown) {
+  if (error && typeof error === "object" && "message" in error) {
+    return String(error.message);
+  }
+  return "An unexpected error occurred.";
+}
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const usernameEditRef = useRef(false);
+
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [inboxLoading, setInboxLoading] = useState(true);
+  const [inboxError, setInboxError] = useState("");
+  const [inboxRetry, setInboxRetry] = useState(0);
+  const [activeTab, setActiveTab] = useState<Tab>("inbox");
+
+  const [username, setUsername] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [inboxEnabled, setInboxEnabled] = useState(true);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileError, setProfileError] = useState("");
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [selectedMessageId, setSelectedMessageId] = useState("");
+  const [cardNotice, setCardNotice] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const initials = (displayName || username || user?.email || "W")
+    .trim()
+    .charAt(0)
+    .toUpperCase();
+
+  useEffect(() => {
+    return onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+      if (!currentUser) router.replace("/login");
+    });
+  }, [router]);
+
+  useEffect(() => {
+    if (!user) return;
+    setProfileLoading(true);
+    return onSnapshot(
+      doc(db, "profiles", user.uid),
+      (snapshot) => {
+        const data = snapshot.data();
+        const savedUsername = typeof data?.username === "string" ? data.username : "";
+        setUsername(savedUsername);
+        if (!usernameEditRef.current) setNewUsername(savedUsername);
+        setDisplayName(typeof data?.displayName === "string" ? data.displayName : user.displayName || "");
+        // Profiles without this field remain enabled by default.
+        setInboxEnabled(data?.inboxEnabled !== false);
+        setProfileLoading(false);
+      },
+      (error) => {
+        console.error("[Whispr] Profile retrieval failed:", error);
+        setProfileError(`${error.code}: ${error.message}`);
+        setProfileLoading(false);
+      },
+    );
+  }, [user]);
+
+  useEffect(() => {
+    if (!user) return;
+    setInboxLoading(true);
+    setInboxError("");
+    const messagesQuery = query(
+      collection(db, "messages"),
+      where("recipientUid", "==", user.uid),
+      orderBy("createdAt", "desc"),
+    );
+    return onSnapshot(
+      messagesQuery,
+      (snapshot) => {
+        setMessages(snapshot.docs.map((item) => ({ id: item.id, ...item.data() })) as Message[]);
+        setInboxLoading(false);
+        setInboxError("");
+      },
+      (error) => {
+        console.error("[Whispr] Inbox retrieval failed:", error);
+        setInboxError(`${error.code}: ${error.message}`);
+        setInboxLoading(false);
+      },
+    );
+  }, [user, inboxRetry]);
+
+  const questions = useMemo(
+    () => messages.filter((message) => typeof message.text === "string" && message.text.trim().length > 0),
+    [messages],
+  );
+  const selectedQuestion = questions.find((message) => message.id === selectedMessageId);
+  const shareUrl = useMemo(() => {
+    if (typeof window === "undefined" || !username) return "";
+    return `${window.location.origin}/u/${encodeURIComponent(username)}`;
+  }, [username]);
+
+  async function saveProfile() {
+    if (!user) return;
+    setProfileError("");
+    setProfileSaving(true);
+    try {
+      const desiredUsername = newUsername.trim().toLowerCase();
+      if (!/^[a-z0-9_]{3,20}$/.test(desiredUsername)) {
+        throw new Error("Username must be 3–20 characters using letters, numbers, or underscores.");
+      }
+      const idToken = await user.getIdToken();
+      if (desiredUsername !== username) {
+        const response = await fetch("/api/username", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+          body: JSON.stringify({ username: desiredUsername }),
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(result.error || "Unable to update username.");
+      }
+      await setDoc(
+        doc(db, "profiles", user.uid),
+        { uid: user.uid, displayName: displayName.trim().slice(0, 80), updatedAt: serverTimestamp() },
+        { merge: true },
+      );
+      usernameEditRef.current = false;
+      setNewUsername(desiredUsername);
+      setProfileError("Profile saved successfully.");
+    } catch (error) {
+      console.error("[Whispr] Profile update failed:", error);
+      setProfileError(`Couldn't save profile: ${getErrorMessage(error)}`);
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function toggleInbox() {
+    if (!user || profileSaving) return;
+    setProfileSaving(true);
+    setProfileError("");
+    try {
+      const idToken = await user.getIdToken();
+      const response = await fetch("/api/profile", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${idToken}` },
+        body: JSON.stringify({ inboxEnabled: !inboxEnabled }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || "Unable to update inbox.");
+      setInboxEnabled(!inboxEnabled);
+      setProfileError(!inboxEnabled ? "Anonymous inbox enabled." : "Anonymous inbox disabled.");
+    } catch (error) {
+      console.error("[Whispr] Inbox setting update failed:", error);
+      setProfileError(`Couldn't update inbox: ${getErrorMessage(error)}`);
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
+  async function copyShareLink() {
+    if (!shareUrl) {
+      setNotice("Your username is missing from your profile.");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+      setNotice("Your anonymous link has been copied.");
+    } catch {
+      setNotice(`Copy this link: ${shareUrl}`);
+    }
+  }
+
+  async function shareProfile() {
+    if (!shareUrl) {
+      setCardNotice("Set a username before sharing your profile.");
+      return;
+    }
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: "My Whispr profile",
+          text: "Send me an anonymous question on Whispr.",
+          url: shareUrl,
+        });
+      } else {
+        await navigator.clipboard.writeText(`Send me an anonymous question on Whispr: ${shareUrl}`);
+        setCardNotice("Profile link copied and ready to share.");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
+      setCardNotice("Sharing isn't available. Try copying your profile link.");
+    }
+  }
+
+  async function handleSignOut() {
+    await signOut(auth);
+    router.replace("/login");
+  }
+
+  if (authLoading || !user) {
+    return <main className="whispr-loading"><div className="loading-orb" /><p>Opening your Whispr space…</p></main>;
+  }
+
+  const navItems: { id: Tab; icon: string; label: string }[] = [
+    { id: "inbox", icon: "✉", label: "Inbox" },
+    { id: "stories", icon: "▧", label: "Story Cards" },
+    { id: "profile", icon: "◎", label: "Profile" },
+  ];
+
+  function renderNavigation(mobile = false) {
+    return (
+      <nav className={mobile ? "side-nav mobile-nav" : "side-nav desktop-nav"} aria-label="Dashboard navigation">
+        {navItems.map((item) => (
+          <button
+            key={item.id}
+            className={activeTab === item.id ? "nav-item active" : "nav-item"}
+            onClick={() => { setActiveTab(item.id); setNotice(""); setCardNotice(""); }}
+            aria-current={activeTab === item.id ? "page" : undefined}
+          >
+            <span className="nav-icon" aria-hidden="true">{item.icon}</span>
+            <span className="nav-label">{item.label}</span>
+            {item.id === "inbox" && <span className="nav-count">{messages.length}</span>}
+          </button>
+        ))}
+      </nav>
+    );
+  }
+
+  const questionCard = selectedQuestion?.text?.trim() || "";
+
+  return (
+    <main className="whispr-shell">
+      <aside className="whispr-sidebar">
+        <button className="brand-mark" onClick={() => setActiveTab("inbox")} aria-label="Whispr home">
+          <span className="brand-icon">w.</span><span>whispr</span>
+        </button>
+        <div className="sidebar-label">YOUR SPACE</div>
+        {renderNavigation()}
+        <div className="sidebar-bottom">
+          <div className="sidebar-user">
+            <div className="avatar">{initials}</div>
+            <div className="sidebar-user-copy">
+              <strong>{displayName || username || "Whispr user"}</strong>
+              <span>{username ? `@${username}` : "Your account"}</span>
+            </div>
+          </div>
+          <button className="signout-button" onClick={handleSignOut}>↗ Sign out</button>
+        </div>
+      </aside>
+
+      <section className="whispr-main">
+        <header className="topbar">
+          <div>
+            <span className="eyebrow">YOUR PRIVATE CORNER</span>
+            <h1>{activeTab === "inbox" ? "Your inbox" : activeTab === "stories" ? "Question story cards" : "Your profile"}</h1>
+          </div>
+          <button className="primary-button share-button" onClick={copyShareLink}>↗ Share my link</button>
+        </header>
+
+        {notice && <div className="notice" role="status"><span>{notice}</span><button onClick={() => setNotice("")} aria-label="Dismiss">×</button></div>}
+
+        {activeTab === "inbox" && (
+          <div className="page-content">
+            <div className="welcome-panel">
+              <div><span className="eyebrow">ANONYMOUSLY, JUST FOR YOU</span><h2>Curious what people are thinking?</h2><p>Share your link and let the honest questions find their way to you.</p></div>
+              <div className="welcome-art" aria-hidden="true"><span>✳</span><span>♡</span><span>✦</span></div>
+            </div>
+            <div className="section-heading"><div><h2>Anonymous questions</h2><p>Your inbox is private. Turn any question into a story card whenever you like.</p></div><span className="count-pill">{messages.length} total</span></div>
+            {inboxLoading ? (
+              <div className="empty-state"><div className="loading-orb" /><h3>Loading your questions…</h3></div>
+            ) : inboxError ? (
+              <div className="error-panel"><strong>Couldn't retrieve your inbox</strong><p>{inboxError}</p><p>Check your Firestore rules and any required composite index for recipientUid and createdAt.</p><button className="primary-button" onClick={() => setInboxRetry((value) => value + 1)}>Retry inbox</button></div>
+            ) : messages.length === 0 ? (
+              <div className="empty-state"><div className="empty-icon">✉</div><h3>Your inbox is quiet… for now</h3><p>Share your link to start receiving anonymous questions.</p><button className="primary-button" onClick={copyShareLink}>Copy my link</button></div>
+            ) : (
+              <div className="message-list">
+                {messages.map((message) => (
+                  <article className="message-card" key={message.id}>
+                    <div className="message-card-top"><span className="anonymous-avatar">?</span><div className="message-meta"><strong>Anonymous</strong><span>{formatDate(message.createdAt)}</span></div>{message.tag && <span className="message-tag">{message.tag}</span>}</div>
+                    <p className="message-text">{message.text || "This question has no text."}</p>
+                    <div className="message-actions">
+                      <button className="primary-button" onClick={() => { setSelectedMessageId(message.id); setActiveTab("stories"); setCardNotice(""); }}>Create question story</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "stories" && (
+          <div className="page-content">
+            <div className="section-heading">
+              <div><h2>Make a question story</h2><p>Choose any anonymous question and create a clean, share-ready story card. No reply or publishing needed.</p></div>
+              <span className="count-pill">{questions.length} questions</span>
+            </div>
+
+            {cardNotice && <div className="notice" role="status"><span>{cardNotice}</span><button type="button" onClick={() => setCardNotice("")} aria-label="Dismiss">×</button></div>}
+
+            {inboxLoading ? <div className="empty-state">Loading your questions…</div> : inboxError ? <div className="error-panel">{inboxError}</div> : questions.length === 0 ? (
+              <div className="empty-state"><div className="empty-icon">▧</div><h3>No questions to turn into cards yet</h3><p>Share your Whispr link first. New anonymous questions will appear here automatically.</p><button className="primary-button" onClick={copyShareLink}>Copy my link</button></div>
+            ) : (
+              <div className="message-card story-studio-panel">
+                <label className="field-label" htmlFor="question-story-select">CHOOSE A QUESTION</label>
+                <select id="question-story-select" className="profile-input" value={selectedMessageId} onChange={(event) => setSelectedMessageId(event.target.value)}>
+                  <option value="">Select an anonymous question…</option>
+                  {questions.map((message) => (
+                    <option key={message.id} value={message.id}>
+                      {(message.text || "Anonymous question").replace(/\s+/g, " ").slice(0, 100)}
+                    </option>
+                  ))}
+                </select>
+
+                {selectedQuestion ? (
+                  <div className="question-story-card" id="whispr-question-story">
+                    <div className="question-story-glow" aria-hidden="true" />
+                    <div className="question-story-content">
+                      <div className="question-story-brand"><span className="question-story-mark">w.</span><span>WHISPR</span></div>
+                      <div className="question-story-kicker"><span>✦</span> SOMEONE ASKED</div>
+                      <div className="question-story-quote" aria-hidden="true">“</div>
+                      <p className="question-story-text">{questionCard}</p>
+                      <div className="question-story-footer">
+                        <span className="question-story-anon"><span>?</span> anonymous</span>
+                        <span className="question-story-line" />
+                        <span className="question-story-handle">@{username || "yourusername"}</span>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="empty-state story-select-empty"><div className="empty-icon">✧</div><h3>Your story preview appears here</h3><p>Pick a question above to preview the card.</p></div>
+                )}
+
+                {selectedQuestion && (
+                  <div className="message-actions story-card-actions">
+                    <button type="button" className="primary-button" onClick={() => window.print()}>Print / Save as PDF</button>
+                    <button type="button" className="primary-button" onClick={shareProfile}>Share my profile link</button>
+                  </div>
+                )}
+                <p className="muted-text story-studio-hint">Tip: use your browser’s screenshot tool to save the preview as an image for Instagram Stories.</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeTab === "profile" && (
+          <div className="page-content">
+            <div className="section-heading"><div><h2>Your profile</h2><p>Manage how you appear in your Whispr space.</p></div></div>
+            {profileLoading ? <div className="empty-state">Loading your profile…</div> : (
+              <div className="profile-panel">
+                <div className="profile-avatar">{initials}</div>
+                <label className="field-label" htmlFor="display-name">DISPLAY NAME</label>
+                <input id="display-name" className="profile-input" value={displayName} maxLength={80} onChange={(event) => setDisplayName(event.target.value)} placeholder="Your display name" />
+                <label className="field-label" htmlFor="username">USERNAME</label>
+                <input id="username" className="profile-input" value={newUsername} onChange={(event) => { usernameEditRef.current = true; setNewUsername(event.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 20)); }} minLength={3} maxLength={20} pattern="[a-z0-9_]{3,20}" autoComplete="username" />
+                <p className="muted-text">Use 3–20 lowercase letters, numbers, or underscores. Changing your username changes your public profile link.</p>
+                <button type="button" className="primary-button" disabled={profileSaving} onClick={saveProfile}>{profileSaving ? "Saving…" : "Save profile"}</button>
+                <div className="inbox-setting" style={{ marginTop: 24 }}>
+                  <div><strong>Anonymous inbox</strong><p className="muted-text">{inboxEnabled ? "People can send you anonymous questions." : "Your public inbox is currently closed."}</p></div>
+                  <button type="button" className="primary-button" onClick={toggleInbox} disabled={profileSaving}>{profileSaving ? "Updating…" : inboxEnabled ? "Disable inbox" : "Enable inbox"}</button>
+                </div>
+                {profileError && <div className="notice" role="status">{profileError}</div>}
+                <div className="profile-share-row"><p>{shareUrl || "Your username is not available yet."}</p><button type="button" className="primary-button" onClick={copyShareLink}>Copy profile link</button></div>
+                <button type="button" className="signout-button profile-signout" onClick={handleSignOut}>↗ Sign out</button>
+              </div>
+            )}
+          </div>
+        )}
+      </section>
+      <div className="mobile-bottom-nav">{renderNavigation(true)}</div>
+    </main>
+  );
+}

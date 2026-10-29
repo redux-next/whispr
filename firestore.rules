@@ -1,0 +1,32 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    // Public profile fields only. Never store private email, tokens, or inbox data here.
+    match /profiles/{uid} {
+      allow read: if true;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.keys().hasOnly(['uid','username','displayName','bio','inboxEnabled','createdAt','updatedAt'])
+        && request.resource.data.uid == uid
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-z0-9_]{3,20}$')
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() <= 40
+        && request.resource.data.bio is string
+        && request.resource.data.bio.size() <= 160
+        && request.resource.data.inboxEnabled is bool;
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+    // Sensitive writes go through validated server routes using Firebase Admin.
+    match /messages/{messageId} {
+      allow read: if signedIn() && resource.data.recipientUid == request.auth.uid;
+      allow create, update, delete: if false;
+    }
+    match /reports/{reportId} { allow read, write: if false; }
+    match /rateLimits/{limitId} { allow read, write: if false; }
+    match /dailyVibes/{date} { allow read: if true; allow write: if false; }
+    match /publicReplies/{replyId} { allow read: if resource.data.published == true; allow write: if false; }
+    match /usernames/{username} { allow read: if true; allow create: if signedIn() && request.resource.data.keys().hasOnly(['uid','username']) && request.resource.data.uid == request.auth.uid && request.resource.data.username == username && username.matches('^[a-z0-9_]{3,20}$'); allow update, delete: if false; }
+    match /blocks/{blockId} { allow read, write: if false; }
+  }
+}

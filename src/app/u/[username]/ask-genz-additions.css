@@ -1,0 +1,69 @@
+/* Append-friendly visual layer for the public Whispr profile page. */
+.ask-genz-page {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background:
+    radial-gradient(ellipse at 12% 18%, rgba(255, 121, 190, .15), transparent 34%),
+    radial-gradient(ellipse at 88% 45%, rgba(158, 119, 255, .17), transparent 36%),
+    var(--background, #0b0912);
+}
+.ask-genz-shell { position: relative; z-index: 1; }
+.ask-genz-sticker {
+  position: absolute;
+  z-index: -1;
+  display: grid;
+  place-items: center;
+  color: #f8b8e2;
+  opacity: .78;
+  pointer-events: none;
+  filter: drop-shadow(0 8px 24px rgba(216, 105, 255, .2));
+}
+.ask-genz-sticker-one { top: 19%; left: max(3%, calc((100vw - 1050px) / 2 - 42px)); transform: rotate(-14deg); }
+.ask-genz-sticker-two { top: 37%; right: max(4%, calc((100vw - 1050px) / 2 - 34px)); transform: rotate(12deg); color: #ff9ccf; }
+.ask-genz-sticker-three { top: 62%; left: max(4%, calc((100vw - 1050px) / 2 - 32px)); font-size: 34px; color: #b7a4ff; transform: rotate(10deg); }
+.ask-genz-hero { position: relative; }
+.ask-genz-avatar {
+  box-shadow: 0 0 0 7px rgba(255,255,255,.035), 0 12px 45px rgba(193, 111, 255, .22);
+  border: 1px solid rgba(255,255,255,.22);
+}
+.ask-genz-profile-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 auto 18px;
+  padding: 8px 12px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 999px;
+  background: rgba(255,255,255,.045);
+  color: rgba(255,255,255,.78);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .12em;
+}
+.ask-genz-live-dot { width: 7px; height: 7px; border-radius: 50%; background: #7ee7b5; box-shadow: 0 0 12px rgba(126,231,181,.75); }
+.ask-genz-prompt-chips { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin: 22px 0 18px; }
+.ask-genz-prompt-chips span {
+  border: 1px solid rgba(255,255,255,.1);
+  background: rgba(255,255,255,.045);
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: rgba(255,255,255,.82);
+  font-size: 12px;
+}
+.ask-genz-compose {
+  border: 1px solid rgba(255,255,255,.12);
+  box-shadow: 0 24px 90px rgba(0,0,0,.22), 0 0 50px rgba(184,104,255,.06);
+  backdrop-filter: blur(18px);
+}
+.ask-genz-compose-icon { transform: rotate(-7deg); }
+.ask-genz-form-note { display: flex; align-items: center; justify-content: center; gap: 6px; margin: 14px 0 0; color: rgba(255,255,255,.52); font-size: 11px; }
+.ask-genz-footer p { display: flex; align-items: center; gap: 6px; }
+.ask-genz-error { padding-bottom: 50px; }
+@media (max-width: 640px) {
+  .ask-genz-sticker-one { top: 16%; left: 5%; }
+  .ask-genz-sticker-two { top: 35%; right: 4%; }
+  .ask-genz-sticker-three { display: none; }
+  .ask-genz-prompt-chips { gap: 6px; }
+  .ask-genz-prompt-chips span { font-size: 11px; padding: 7px 10px; }
+}

@@ -1,0 +1,723 @@
+
+"use client";
+
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { signOut } from "firebase/auth";
+import { auth, db } from "@/lib/firebase";
+import {
+  collection,
+  doc,
+  onSnapshot,
+  orderBy,
+  query,
+  where,
+} from "firebase/firestore";
+import { useSession } from "@/components/AuthProvider";
+import {
+  ArrowUpRight,
+  Copy,
+  ExternalLink,
+  Flag,
+  LogOut,
+  MessageCircle,
+  PauseCircle,
+  PlayCircle,
+  Share2,
+  Sparkles,
+  Trash2,
+  WandSparkles,
+} from "lucide-react";
+
+type Msg = {
+  id: string;
+  text: string;
+  tag?: string;
+  createdAt?: { toDate?: () => Date } | null;
+  published?: boolean;
+  reply?: string;
+};
+
+type Profile = {
+  username?: string;
+  displayName?: string;
+  bio?: string;
+  inboxEnabled?: boolean;
+};
+
+export default function Dashboard() {
+  const { user, loading } = useSession();
+  const router = useRouter();
+
+  const [profile, setProfile] = useState<Profile | null>(null);
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [tab, setTab] = useState<"inbox" | "published" | "studio">("inbox");
+  const [active, setActive] = useState<Msg | null>(null);
+  const [reply, setReply] = useState("");
+  const [daily, setDaily] = useState<{ prompt?: string } | null>(null);
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!loading && !user) router.replace("/login");
+  }, [loading, user, router]);
+
+  useEffect(() => {
+    if (!user) return;
+
+    const unsubscribeProfile = onSnapshot(
+      doc(db, "profiles", user.uid),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          setProfile(snapshot.data() as Profile);
+        }
+      },
+      (error) => {
+        console.error("Whispr profile error:", error);
+        setNotice("Could not load your profile. Please refresh.");
+      }
+    );
+
+    const inboxQuery = query(
+      collection(db, "messages"),
+      where("recipientUid", "==", user.uid),
+      orderBy("createdAt", "desc")
+    );
+
+    const unsubscribeMessages = onSnapshot(
+      inboxQuery,
+      (snapshot) => {
+        setMessages(
+          snapshot.docs.map(
+            (item) =>
+              ({
+                id: item.id,
+                ...item.data(),
+              }) as Msg
+          )
+        );
+      },
+      (error) => {
+        console.error("Whispr inbox error:", error);
+        setNotice(
+          "Could not load your inbox. Check your Firestore rules and indexes."
+        );
+      }
+    );
+
+    fetch("/api/daily-vibe")
+      .then((response) => {
+        if (!response.ok) throw new Error("Daily prompt unavailable");
+        return response.json();
+      })
+      .then(setDaily)
+      .catch((error) => console.error("Daily vibe error:", error));
+
+    return () => {
+      unsubscribeProfile();
+      unsubscribeMessages();
+    };
+  }, [user]);
+
+  if (loading || !user) {
+    return (
+      <main className="page py-20 muted">
+        Loading your Whispr…
+      </main>
+    );
+  }
+
+  const published = messages.filter((message) => message.published);
+  const username = profile?.username;
+  const profileUrl =
+    typeof window !== "undefined" && username
+      ? `${window.location.origin}/u/${username}`
+      : "";
+
+  const prompts = [
+    "What's something you wish people understood about you?",
+    "What's a little thing that made you smile today?",
+    "What advice would you give your younger self?",
+    "What's a compliment you still remember?",
+    "What's one thing you're looking forward to?",
+  ];
+
+  const promptText =
+    daily?.prompt || prompts[new Date().getDate() % prompts.length];
+
+  async function callApi(url: string, body: Record<string, unknown>) {
+    const idToken = await user!.getIdToken();
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${idToken}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error || "Something went wrong.");
+    }
+
+    return data;
+  }
+
+  function tell(message: string) {
+    setNotice(message);
+    window.setTimeout(() => setNotice(""), 4500);
+  }
+
+  async function copyLink() {
+    if (!username) {
+      tell("Your username has not loaded yet.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(
+        `${window.location.origin}/u/${username}`
+      );
+      tell("Your Whispr link has been copied!");
+    } catch {
+      tell(`Your link: ${window.location.origin}/u/${username}`);
+    }
+  }
+
+  async function publishReply() {
+    if (!active || !reply.trim()) return;
+
+    setBusy(true);
+
+    try {
+      await callApi("/api/replies", {
+        messageId: active.id,
+        reply: reply.trim(),
+        published: true,
+      });
+
+      setActive(null);
+      setReply("");
+      tell("Reply published on your public profile.");
+    } catch (error) {
+      tell(error instanceof Error ? error.message : "Could not publish reply.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeMessage(message: Msg) {
+    if (!window.confirm("Delete this message permanently?")) return;
+
+    try {
+      await callApi("/api/messages/delete", {
+        messageId: message.id,
+      });
+
+      if (active?.id === message.id) {
+        setActive(null);
+        setReply("");
+      }
+
+      tell("Message deleted.");
+    } catch (error) {
+      tell(error instanceof Error ? error.message : "Could not delete message.");
+    }
+  }
+
+  async function reportMessage(message: Msg) {
+    const reason = window.prompt(
+      "Why are you reporting this message? (spam, harassment, threat, other)"
+    );
+
+    if (!reason?.trim()) return;
+
+    try {
+      await callApi("/api/reports", {
+        messageId: message.id,
+        reason: reason.trim(),
+      });
+
+      tell("Report submitted. Thank you for helping keep Whispr safe.");
+    } catch (error) {
+      tell(error instanceof Error ? error.message : "Could not submit report.");
+    }
+  }
+
+  async function toggleInbox() {
+    if (!profile) {
+      tell("Your profile is still loading. Please try again.");
+      return;
+    }
+
+    try {
+      await callApi("/api/profile", {
+        inboxEnabled: profile.inboxEnabled === false,
+      });
+
+      tell(
+        profile.inboxEnabled === false
+          ? "Your inbox is open again."
+          : "Your inbox has been paused."
+      );
+    } catch (error) {
+      tell(error instanceof Error ? error.message : "Could not update inbox.");
+    }
+  }
+
+  function selectMessage(message: Msg) {
+    setActive(message);
+    setReply(message.reply || "");
+    setTab("studio");
+  }
+
+  return (
+    <main className="page pb-16">
+      <nav className="nav">
+        <Link href="/" className="brand">
+          whispr<span className="brand-dot">.</span>
+        </Link>
+
+        <div className="flex items-center gap-3">
+          <span className="muted small hidden sm:inline">
+            {user.email}
+          </span>
+
+          <button
+            className="secondary !p-2"
+            onClick={async () => {
+              await signOut(auth);
+              router.push("/");
+            }}
+            aria-label="Sign out"
+            title="Sign out"
+          >
+            <LogOut size={16} />
+          </button>
+        </div>
+      </nav>
+
+      <header className="py-7 md:py-10 flex flex-col md:flex-row md:items-end justify-between gap-5">
+        <div>
+          <div className="pill inline-flex items-center gap-2">
+            <Sparkles size={13} />
+            YOUR PRIVATE SPACE
+          </div>
+
+          <h1 className="display text-4xl md:text-5xl mt-4">
+            Hey, {profile?.displayName || user.displayName || "there"}
+            <span className="gradient-text">.</span>
+          </h1>
+
+          <p className="muted mt-2">
+            Your inbox, your voice, your rules.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            className="secondary flex items-center gap-2"
+            onClick={toggleInbox}
+          >
+            {profile?.inboxEnabled === false ? (
+              <>
+                <PlayCircle size={16} /> Open inbox
+              </>
+            ) : (
+              <>
+                <PauseCircle size={16} /> Pause inbox
+              </>
+            )}
+          </button>
+
+          <Link
+            href="/story-studio"
+            className="secondary flex items-center gap-2"
+          >
+            <Sparkles size={16} />
+            Story Studio
+            <ArrowUpRight size={14} />
+          </Link>
+
+          <button
+            className="primary flex items-center gap-2"
+            onClick={copyLink}
+          >
+            <Share2 size={16} />
+            Copy my link
+          </button>
+        </div>
+      </header>
+
+      {notice && (
+        <div role="status" className="toast mb-4">
+          {notice}
+        </div>
+      )}
+
+      <div className="grid sm:grid-cols-3 gap-3 mb-6">
+        <div className="panel p-5">
+          <div className="muted small">TOTAL MESSAGES</div>
+          <div className="display text-3xl mt-2">{messages.length}</div>
+        </div>
+
+        <div className="panel p-5">
+          <div className="muted small">PUBLISHED REPLIES</div>
+          <div className="display text-3xl mt-2">{published.length}</div>
+        </div>
+
+        <div className="panel p-5">
+          <div className="muted small">INBOX STATUS</div>
+          <div className="display text-xl mt-3 flex items-center gap-2">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                profile?.inboxEnabled === false
+                  ? "bg-amber-300"
+                  : "bg-emerald-300"
+              }`}
+            />
+            {profile?.inboxEnabled === false ? "Paused" : "Open to messages"}
+          </div>
+        </div>
+      </div>
+
+      <section className="panel p-5 md:p-6 mb-6">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="pill inline-flex items-center gap-2">
+              <Sparkles size={13} />
+              DAILY VIBE
+            </div>
+
+            <h2 className="display text-2xl mt-3">A prompt for today</h2>
+            <p className="text-lg mt-2">{promptText}</p>
+            <p className="muted small mt-2">
+              Use this prompt in your story or send it to friends.
+            </p>
+          </div>
+
+          <div className="text-purple-200 hidden sm:block">
+            <WandSparkles size={28} />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2 mt-4">
+          <button
+            className="secondary"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(promptText);
+                tell("Daily prompt copied.");
+              } catch {
+                tell(promptText);
+              }
+            }}
+          >
+            <Copy size={14} className="inline mr-2" />
+            Copy prompt
+          </button>
+
+          <Link
+            href="/story-studio"
+            className="secondary inline-flex items-center gap-2"
+          >
+            <Sparkles size={14} />
+            Create a story
+          </Link>
+        </div>
+      </section>
+
+      <div className="flex flex-wrap gap-2 border-b border-white/10 pb-3 mb-5">
+        {(
+          [
+            ["inbox", "Inbox"],
+            ["published", "Published replies"],
+            ["studio", "Reply Studio"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            onClick={() => setTab(id)}
+            className={tab === id ? "primary" : "secondary"}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "inbox" && (
+        <section>
+          <div className="flex flex-wrap justify-between items-center gap-3 mb-4">
+            <h2 className="display text-2xl">
+              Your messages{" "}
+              <span className="muted text-base">({messages.length})</span>
+            </h2>
+            <span className="muted small">
+              Only you can read your inbox.
+            </span>
+          </div>
+
+          {messages.length === 0 ? (
+            <div className="panel p-10 text-center">
+              <MessageCircle
+                size={30}
+                className="mx-auto text-purple-300"
+              />
+              <h3 className="display text-xl mt-4">
+                Your inbox is a blank canvas.
+              </h3>
+              <p className="muted mt-2">
+                Share your link to invite your first anonymous message.
+              </p>
+              <button className="primary mt-5" onClick={copyLink}>
+                Copy my link
+              </button>
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-4">
+              {messages.map((message) => (
+                <article key={message.id} className="panel p-5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="pill">{message.tag || "message"}</span>
+                    <span className="muted text-xs">
+                      {message.createdAt?.toDate?.().toLocaleString() ||
+                        "Just now"}
+                    </span>
+                  </div>
+
+                  <p className="message text-lg leading-7 mt-4">
+                    {message.text}
+                  </p>
+
+                  {message.published && (
+                    <p className="text-emerald-300 small mt-3">
+                      Published reply: {message.reply}
+                    </p>
+                  )}
+
+                  <div className="flex flex-wrap gap-2 mt-5">
+                    <button
+                      className="primary"
+                      onClick={() => selectMessage(message)}
+                    >
+                      <WandSparkles size={14} className="inline mr-1" />
+                      {message.published ? "Edit reply" : "Reply in Studio"}
+                    </button>
+
+                    <button
+                      className="secondary"
+                      onClick={() => reportMessage(message)}
+                    >
+                      <Flag size={14} className="inline mr-1" />
+                      Report
+                    </button>
+
+                    <button
+                      className="danger"
+                      onClick={() => removeMessage(message)}
+                    >
+                      <Trash2 size={14} className="inline mr-1" />
+                      Delete
+                    </button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === "published" && (
+        <section>
+          <h2 className="display text-2xl mb-4">Out in the world</h2>
+
+          {published.length === 0 ? (
+            <div className="panel p-8 muted">
+              No public replies yet. Choose a message and publish a reply from
+              Reply Studio.
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-4">
+              {published.map((message) => (
+                <article className="story-card" key={message.id}>
+                  <div className="muted small">
+                    WHISPR · ANONYMOUS MESSAGE
+                  </div>
+
+                  <p className="display text-xl mt-3">
+                    “{message.text}”
+                  </p>
+
+                  <div className="border-t border-purple-300/20 mt-5 pt-4">
+                    <div className="muted small">MY REPLY</div>
+                    <p className="text-lg mt-1">{message.reply}</p>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2 mt-5">
+                    <button
+                      className="secondary"
+                      onClick={() => selectMessage(message)}
+                    >
+                      Edit reply
+                    </button>
+
+                    <Link
+                      href="/story-studio"
+                      className="secondary inline-flex items-center gap-2"
+                    >
+                      Create story <ExternalLink size={14} />
+                    </Link>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === "studio" && (
+        <section className="grid lg:grid-cols-2 gap-5">
+          <div className="panel p-5 md:p-6">
+            <h2 className="display text-2xl">Reply Studio</h2>
+            <p className="muted mt-1 mb-5">
+              Choose a message, write your reply, then publish it to your
+              public profile.
+            </p>
+
+            {!active ? (
+              <div className="space-y-2">
+                {messages.map((message) => (
+                  <button
+                    key={message.id}
+                    className="w-full text-left secondary !p-4"
+                    onClick={() => selectMessage(message)}
+                  >
+                    <span className="pill">{message.tag || "message"}</span>
+                    <p className="mt-2 line-clamp-2">{message.text}</p>
+                  </button>
+                ))}
+
+                {messages.length === 0 && (
+                  <p className="muted">Your inbox is empty for now.</p>
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="rounded-xl bg-white/[.04] border border-white/10 p-4">
+                  <div className="muted small">ANONYMOUS MESSAGE</div>
+                  <p className="mt-2">{active.text}</p>
+                </div>
+
+                <label className="block text-sm mt-4">
+                  Your public reply
+                  <textarea
+                    className="input min-h-32 mt-2"
+                    value={reply}
+                    onChange={(event) => setReply(event.target.value)}
+                    maxLength={500}
+                    placeholder="Write something worth sharing…"
+                  />
+                </label>
+
+                <p className="muted text-xs mt-1">
+                  {reply.length}/500 characters.
+                </p>
+
+                <div className="flex flex-wrap gap-2 mt-4">
+                  <button
+                    className="primary"
+                    disabled={busy || !reply.trim()}
+                    onClick={publishReply}
+                  >
+                    {busy ? "Publishing…" : "Publish reply"}
+                  </button>
+
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      setActive(null);
+                      setReply("");
+                    }}
+                  >
+                    Cancel
+                  </button>
+                </div>
+
+                <p className="muted text-xs mt-4">
+                  Publishing makes the message and your reply visible on your
+                  public profile.
+                </p>
+              </>
+            )}
+          </div>
+
+          <div>
+            <div className="muted small mb-2">LIVE REPLY PREVIEW</div>
+
+            <div className="story-card min-h-[360px] flex flex-col justify-between">
+              <div className="flex justify-between gap-3">
+                <span className="brand">
+                  whispr<span className="brand-dot">.</span>
+                </span>
+                <span className="pill">ANONYMOUS</span>
+              </div>
+
+              <div>
+                <p className="muted small">SOMEONE ASKED</p>
+                <p className="display text-2xl mt-2">
+                  {active?.text || "Your selected message appears here."}
+                </p>
+
+                <div className="border-t border-purple-300/20 mt-5 pt-4">
+                  <p className="muted small">MY REPLY</p>
+                  <p className="text-xl mt-2">
+                    {reply || "Your reply will appear here…"}
+                  </p>
+                </div>
+              </div>
+
+              <div className="muted small">
+                whispr · say it without saying who.
+              </div>
+            </div>
+
+            <Link
+              href="/story-studio"
+              className="primary mt-3 inline-flex items-center gap-2"
+            >
+              <Sparkles size={16} />
+              Open Story Studio
+              <ArrowUpRight size={14} />
+            </Link>
+
+            <p className="muted text-xs mt-3">
+              Story Studio creates a separate shareable story image. You can
+              export it and share it on your social platforms.
+            </p>
+          </div>
+        </section>
+      )}
+
+      <footer className="mt-12 pt-5 border-t border-white/10 flex flex-wrap justify-between gap-3">
+        <Link href="/" className="muted small">
+          ← Back to Whispr
+        </Link>
+
+        <button
+          className="secondary"
+          onClick={async () => {
+            await signOut(auth);
+            router.push("/");
+          }}
+        >
+          <LogOut size={14} className="inline mr-1" />
+          Sign out
+        </button>
+      </footer>
+    </main>
+  );
+}
